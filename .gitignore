@@ -1,0 +1,11 @@
+.lake/
+.start_time
+
+# Build outputs, except the artifacts the proofs are about.
+build/*
+!build/pure.elf
+!build/symbols.txt
+!build/pure.dump
+
+# The specification is cloned and patched by tools/fetch_spec.sh.
+spec/EVMYulLean/

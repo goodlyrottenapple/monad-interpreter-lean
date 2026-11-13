@@ -1,0 +1,814 @@
+diff --git a/Conform/Main.lean b/Conform/Main.lean
+index 06ad4a0..145555b 100644
+--- a/Conform/Main.lean
++++ b/Conform/Main.lean
+@@ -5,12 +5,12 @@ def TestsSubdir : System.FilePath := "BlockchainTests"
+ def isTestFile (file : System.FilePath) : Bool := file.extension.option false (· == "json")
+ 
+ private def basicSuccess (name : System.FilePath)
+-                         (result : Batteries.RBMap String EvmYul.Conform.TestResult compare) : IO Bool := do
++                         (result : RBTree.RBMap String EvmYul.Conform.TestResult compare) : IO Bool := do
+   if result.all (λ _ v ↦ v.isNone)
+   then IO.println s!"SUCCESS! - {name}"; pure true
+   else pure false
+ 
+-private def success (result : Batteries.RBMap String EvmYul.Conform.TestResult compare) : Array String × Array String :=
++private def success (result : RBTree.RBMap String EvmYul.Conform.TestResult compare) : Array String × Array String :=
+   let (succeeded, failed) := result.partition (λ _ v ↦ v.isNone)
+   (succeeded.keys, failed.keys)
+ 
+@@ -58,7 +58,7 @@ def testFiles (root               : System.FilePath)
+       λ (json, filepath) ↦
+         match json.getObj? with
+         | .error _ => panic! "Malformed test json."
+-        | .ok x => (filepath, x.toArray.map Sigma.fst |>.filter isToBeTested)  
++        | .ok x => (filepath, x.toArray.map Prod.fst |>.filter isToBeTested)  
+ 
+   let mut tasks : Array (Task _) := .empty
+   let mut thread := 0
+diff --git a/Conform/Model.lean b/Conform/Model.lean
+index a80c4e3..505c05f 100644
+--- a/Conform/Model.lean
++++ b/Conform/Model.lean
+@@ -88,7 +88,7 @@ structure TestEntry where
+   sealEngine         : Json := ""
+   deriving Inhabited
+ 
+-abbrev TestMap := Batteries.RBMap String TestEntry compare
++abbrev TestMap := RBTree.RBMap String TestEntry compare
+ 
+ abbrev AccessListEntry := AccountAddress × Array UInt256
+ 
+diff --git a/Conform/TestParser.lean b/Conform/TestParser.lean
+index 46d3a3f..c5c0d7f 100644
+--- a/Conform/TestParser.lean
++++ b/Conform/TestParser.lean
+@@ -182,7 +182,7 @@ instance : FromJson TestMap where
+ end FromJson
+ 
+ def testNamesOfTest (test : Lean.Json) : Except String (Array String) :=
+-  test.getObj? <&> (·.toArray.map Sigma.fst)
++  test.getObj? <&> (·.toArray.map Prod.fst)
+ 
+ section PrettyPrinter
+ 
+diff --git a/Conform/Wheels.lean b/Conform/Wheels.lean
+index 7eec645..a7690b7 100644
+--- a/Conform/Wheels.lean
++++ b/Conform/Wheels.lean
+@@ -1,7 +1,7 @@
+ import Lean.Data.Json
+ import EvmYul.UInt256
+ import EvmYul.Wheels
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ 
+ import Mathlib.Data.Multiset.Sort
+ 
+@@ -31,9 +31,9 @@ def getObjValAsD! (j : Json) (α : Type) [FromJson α] [Inhabited α] (k : Strin
+   getObjValAsD j α k default
+ 
+ def getObjVals?
+-  (self : Json) (α β : Type) [Ord α] [FromJson α] [FromJson β] : Except String (Batteries.RBMap α β compare) := do
+-  let keys ← Array.map Sigma.fst <$> RBNode.toArray <$> self.getObj?
+-  let mut result : Batteries.RBMap α β compare := ∅
++  (self : Json) (α β : Type) [Ord α] [FromJson α] [FromJson β] : Except String (RBTree.RBMap α β compare) := do
++  let keys ← Std.TreeMap.Raw.keysArray <$> self.getObj?
++  let mut result : RBTree.RBMap α β compare := ∅
+   for k in keys do
+     if let .ok key := FromJson.fromJson? k then
+     result := result.insert key (← self.getObjValAs? β k)
+@@ -103,24 +103,11 @@ end DebuggingAndProfiling
+ end EvmYul
+ 
+ def computeToList! {α}
+-                   [LE α] [IsTrans α (· ≤ ·)] [IsAntisymm α (· ≤ ·)] [IsTotal α (· ≤ ·)]
++                   [LE α] [IsTrans α (· ≤ ·)] [Std.Antisymm (α := α) (· ≤ ·)] [Std.Total (α := α) (· ≤ ·)]
+                    [DecidableRel (α := α) (· ≤ ·)] (m : Multiset α) : List α :=
+   m.sort (· ≤ ·)
+ 
+-def Batteries.RBMap.partition {α β : Type} {cmp : α → α → Ordering}
+-  (t : Batteries.RBMap α β cmp) (p : α → β → Bool) : Batteries.RBMap α β cmp × Batteries.RBMap α β cmp :=
++def RBTree.RBMap.partition {α β : Type} {cmp : α → α → Ordering}
++  (t : RBTree.RBMap α β cmp) (p : α → β → Bool) : RBTree.RBMap α β cmp × RBTree.RBMap α β cmp :=
+   (t.filter p, t.filter (λ k v ↦ not (p k v)))
+ 
+-namespace Std
+-
+-namespace HashSet
+-
+-def diff {α : Type} [DecidableEq α] [Hashable α] (a b : HashSet α) : HashSet α := Id.run do
+-  let mut res := a
+-  for elem in b do
+-    res := res.erase elem
+-  return res
+-
+-end HashSet
+-
+-end Std
+diff --git a/EvmYul/EVM/Gas.lean b/EvmYul/EVM/Gas.lean
+index e5ebec8..5008c10 100644
+--- a/EvmYul/EVM/Gas.lean
++++ b/EvmYul/EVM/Gas.lean
+@@ -178,7 +178,7 @@ def Cgascap (t r : AccountAddress) (val g : UInt256) (σ : AccountMap .EVM) (μ
+ 
+ def Ccallgas (t r : AccountAddress) (val g : UInt256) (σ : AccountMap .EVM) (μ : MachineState) (A : Substate) : ℕ :=
+   match val with
+-    | ⟨0⟩ => Cgascap t r val g σ μ A
++    | ⟨⟨0, _⟩⟩ => Cgascap t r val g σ μ A
+     | _ => Cgascap t r val g σ μ A + GasConstants.Gcallstipend
+ 
+ /--
+diff --git a/EvmYul/EVM/Semantics.lean b/EvmYul/EVM/Semantics.lean
+index 14dcf58..a30090b 100644
+--- a/EvmYul/EVM/Semantics.lean
++++ b/EvmYul/EVM/Semantics.lean
+@@ -524,7 +524,7 @@ def X (fuel : ℕ) (validJumps : Array UInt256) (evmState : State)
+ -/
+ def Ξ -- Type `Ξ` using `\GX` or `\Xi`
+   (fuel : ℕ)
+-  (createdAccounts : Batteries.RBSet AccountAddress compare)
++  (createdAccounts : RBTree.RBSet AccountAddress compare)
+   (genesisBlockHeader : BlockHeader)
+   (blocks : ProcessedBlocks)
+   (σ : AccountMap .EVM)
+@@ -535,7 +535,7 @@ def Ξ -- Type `Ξ` using `\GX` or `\Xi`
+     :
+   Except
+     EVM.ExecutionException
+-    (ExecutionResult (Batteries.RBSet AccountAddress compare × AccountMap .EVM × UInt256 × Substate))
++    (ExecutionResult (RBTree.RBSet AccountAddress compare × AccountMap .EVM × UInt256 × Substate))
+ := do
+   match fuel with
+     | 0 => .error .OutOfFuel
+@@ -562,7 +562,7 @@ def Ξ -- Type `Ξ` using `\GX` or `\Xi`
+ def Lambda
+   (fuel : ℕ)
+   (blobVersionedHashes : List ByteArray)
+-  (createdAccounts : Batteries.RBSet AccountAddress compare) -- needed for EIP-6780
++  (createdAccounts : RBTree.RBSet AccountAddress compare) -- needed for EIP-6780
+   (genesisBlockHeader : BlockHeader)
+   (blocks : ProcessedBlocks)
+   (σ : AccountMap .EVM)
+@@ -581,7 +581,7 @@ def Lambda
+   :
+   Except EVM.ExecutionException
+     ( AccountAddress
+-    × Batteries.RBSet AccountAddress compare
++    × RBTree.RBSet AccountAddress compare
+     × AccountMap .EVM
+     × UInt256
+     × Substate
+@@ -716,7 +716,7 @@ NB - This is implemented using the 'boolean' fragment with ==, <=, ||, etc.
+ -/
+ def Θ (fuel : Nat)
+       (blobVersionedHashes : List ByteArray)
+-      (createdAccounts : Batteries.RBSet AccountAddress compare)
++      (createdAccounts : RBTree.RBSet AccountAddress compare)
+       (genesisBlockHeader : BlockHeader)
+       (blocks : ProcessedBlocks)
+       (σ  : AccountMap .EVM)
+@@ -735,7 +735,7 @@ def Θ (fuel : Nat)
+       (H : BlockHeader)
+       (w  : Bool)
+         :
+-      Except EVM.ExecutionException (Batteries.RBSet AccountAddress compare × AccountMap .EVM × UInt256 × Substate × Bool × ByteArray)
++      Except EVM.ExecutionException (RBTree.RBSet AccountAddress compare × AccountMap .EVM × UInt256 × Substate × Bool × ByteArray)
+ :=
+   match fuel with
+     | 0 => .error .OutOfFuel
+@@ -745,7 +745,7 @@ def Θ (fuel : Nat)
+   let σ'₁ :=
+     match σ.find? r with
+       | none =>
+-        if v != ⟨0⟩ then
++        if v != (⟨0⟩ : UInt256) then
+           σ.insert r { (default : Account .EVM) with balance := v}
+         else
+           σ
+@@ -783,7 +783,7 @@ def Θ (fuel : Nat)
+   let (createdAccounts, z, σ'', g', A'', out) ←
+     match c with
+       | ToExecute.Precompiled p =>
+-        match p with
++        match p.val with
+           | 1  => .ok <| (∅, Ξ_ECREC σ₁ g A I)
+           | 2  => .ok <| (∅, Ξ_SHA256 σ₁ g A I)
+           | 3  => .ok <| (∅, Ξ_RIP160 σ₁ g A I)
+@@ -816,7 +816,7 @@ def Θ (fuel : Nat)
+ 
+ end
+ 
+-open Batteries (RBMap RBSet)
++open RBTree (RBMap RBSet)
+ 
+ 
+ -- Type Υ using \Upsilon or \GU
+@@ -866,7 +866,7 @@ def Υ (fuel : ℕ)
+   let a := -- (80)
+     A0.accessedAccounts.insert S_T
+       |>.insert H.beneficiary
+-      |>.union <| Batteries.RBSet.ofList (accessList.map Prod.fst) compare
++      |>.union <| RBTree.RBSet.ofList (accessList.map Prod.fst) compare
+   -- (81)
+   let g := .ofNat <| T.base.gasLimit.toNat - g₀
+   let AStarₐ := -- (79)
+@@ -874,8 +874,8 @@ def Υ (fuel : ℕ)
+       | some t => a.insert t
+       | none => a
+   let AStar := -- (77)
+-    { A0 with accessedAccounts := AStarₐ, accessedStorageKeys := Batteries.RBSet.ofList AStar_K Substate.storageKeysCmp}
+-  let createdAccounts : Batteries.RBSet AccountAddress compare := .empty
++    { A0 with accessedAccounts := AStarₐ, accessedStorageKeys := RBTree.RBSet.ofList AStar_K Substate.storageKeysCmp}
++  let createdAccounts : RBTree.RBSet AccountAddress compare := .empty
+   let (/- provisional state -/ σ_P, g', A, z) ← -- (76)
+     match T.base.recipient with
+       | none => do
+@@ -938,9 +938,9 @@ def Υ (fuel : ℕ)
+     if beneficiaryFee != ⟨0⟩ then
+       σStar.increaseBalance .EVM H.beneficiary beneficiaryFee
+     else σStar
+-  let σ' := A.selfDestructSet.1.foldl Batteries.RBMap.erase σStar' -- (87)
++  let σ' := A.selfDestructSet.1.foldl RBTree.RBMap.erase σStar' -- (87)
+   let deadAccounts := A.touchedAccounts.filter (State.dead σStar' ·)
+-  let σ' := deadAccounts.foldl Batteries.RBMap.erase σ' -- (88)
++  let σ' := deadAccounts.foldl RBTree.RBMap.erase σ' -- (88)
+   let σ' := σ'.map λ (addr, acc) ↦ (addr, { acc with tstorage := .empty})
+   .ok (σ', A, z, T.base.gasLimit - gStar)
+ end EVM
+diff --git a/EvmYul/EllipticCurves.lean b/EvmYul/EllipticCurves.lean
+index a7e86c8..6fe8099 100644
+--- a/EvmYul/EllipticCurves.lean
++++ b/EvmYul/EllipticCurves.lean
+@@ -16,7 +16,7 @@ def blobECDSARECOVER (e v r s : String) : String :=
+   }
+ 
+ def blobSign (e pᵣ : String) : List String :=
+-  (String.split · Char.isWhitespace) ∘ totallySafePerformIO ∘ IO.Process.run <|
++  (String.splitToList · Char.isWhitespace) ∘ totallySafePerformIO ∘ IO.Process.run <|
+     pythonCommandOfInput e pᵣ
+   where pythonCommandOfInput (e pᵣ : String) : IO.Process.SpawnArgs := {
+     cmd := "python3",
+diff --git a/EvmYul/FFI/ffi.lean b/EvmYul/FFI/ffi.lean
+index a7178da..057f28f 100644
+--- a/EvmYul/FFI/ffi.lean
++++ b/EvmYul/FFI/ffi.lean
+@@ -14,8 +14,10 @@ def BLAKE2 (d : ByteArray) : Except String ByteArray := do
+   if d[212]! ∉ [0, 1].map Nat.toUInt8 then throw "error"
+   return BLAKE2Compress d
+ 
++/-- `n` zero bytes. The Lean body is what proofs see; compiled code calls the C
++    `memset_zero`, which allocates a byte array of size `n` and clears it. -/
+ @[extern "memset_zero"]
+-opaque ByteArray.zeroes (n : USize) : ByteArray
++def ByteArray.zeroes (n : USize) : ByteArray := ⟨Array.replicate n.toNat 0⟩
+ 
+ @[extern "keccak256"]
+ opaque keccak256 (input : @& ByteArray) (len : USize) : ByteArray
+diff --git a/EvmYul/MachineState.lean b/EvmYul/MachineState.lean
+index fdc90dc..ba76396 100644
+--- a/EvmYul/MachineState.lean
++++ b/EvmYul/MachineState.lean
+@@ -2,7 +2,6 @@ import Batteries
+ 
+ import EvmYul.Maps.ByteMap
+ import EvmYul.UInt256
+-import Batteries.Data.HashMap
+ 
+ namespace EvmYul
+ 
+diff --git a/EvmYul/MachineStateOps.lean b/EvmYul/MachineStateOps.lean
+index 490a9f5..04e34e9 100644
+--- a/EvmYul/MachineStateOps.lean
++++ b/EvmYul/MachineStateOps.lean
+@@ -1,4 +1,4 @@
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ 
+ import EvmYul.MachineState
+ 
+@@ -18,7 +18,7 @@ def writeBytes
+ 
+ namespace MachineState
+ 
+-open Batteries (RBMap)
++open RBTree (RBMap)
+ 
+ -- Appendix H, (320)
+ def M (s f l : ℕ) : ℕ :=
+diff --git a/EvmYul/Maps/AccountMap.lean b/EvmYul/Maps/AccountMap.lean
+index 3b8ecca..7722395 100644
+--- a/EvmYul/Maps/AccountMap.lean
++++ b/EvmYul/Maps/AccountMap.lean
+@@ -4,20 +4,20 @@ We need a more unified approach to maps.
+ This file shouldn't exist; but it does for now.
+ `Finmap`s have terrible computational behaviour, one needs some ordering lemmas to make them compute.
+ 
+-In `Conform`, we use `Lean.RBMap`, although we would ideally use `Batteries.RBMap`, but the `Lean.Json`
+-uses `Lean.RBMap`, which means that we would need an additional cast to `Batteries.RBMap`.
++In `Conform`, we use `Lean.RBMap`, although we would ideally use `RBTree.RBMap`, but the `Lean.Json`
++uses `Lean.RBMap`, which means that we would need an additional cast to `RBTree.RBMap`.
+ 
+ Furthermore, replacing everything with either of the `RBMaps` would then reintroduce this mess,
+ but with ordering lemmas needed for some `Decidable` instances.
+ 
+-When time allows, I suggest we replace everything with `Batteries.RBMap` and prove the reasoning lemmas we need.
++When time allows, I suggest we replace everything with `RBTree.RBMap` and prove the reasoning lemmas we need.
+ This way, we get decent performance AND the ability to conveniently reason about the structure
+ a'la `Finmap`.
+ 
+ TODO - All of this is very ugly.
+ -/
+ 
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ 
+ import EvmYul.Wheels
+ 
+@@ -30,7 +30,7 @@ namespace EvmYul
+ 
+ section RemoveLater
+ 
+-abbrev AddrMap (α : Type) [Inhabited α] := Batteries.RBMap AccountAddress α compare
++abbrev AddrMap (α : Type) [Inhabited α] := RBTree.RBMap AccountAddress α compare
+ abbrev AccountMap (τ : OperationType) := AddrMap (Account τ)
+ abbrev PersistentAccountMap (τ : OperationType) := AddrMap (PersistentAccountState τ)
+ def AccountMap.toPersistentAccountMap (τ : OperationType) (a : AccountMap τ) : PersistentAccountMap τ :=
+diff --git a/EvmYul/Maps/ByteMap.lean b/EvmYul/Maps/ByteMap.lean
+index fbf9b2b..e127355 100644
+--- a/EvmYul/Maps/ByteMap.lean
++++ b/EvmYul/Maps/ByteMap.lean
+@@ -4,20 +4,20 @@ We need a more unified approach to maps.
+ This file shouldn't exist; but it does for now.
+ `Finmap`s have terrible computational behaviour, one needs some ordering lemmas to make them compute.
+ 
+-In `Conform`, we use `Lean.RBMap`, although we would ideally use `Batteries.RBMap`, but the `Lean.Json`
+-uses `Lean.RBMap`, which means that we would need an additional cast to `Batteries.RBMap`.
++In `Conform`, we use `Lean.RBMap`, although we would ideally use `RBTree.RBMap`, but the `Lean.Json`
++uses `Lean.RBMap`, which means that we would need an additional cast to `RBTree.RBMap`.
+ 
+ Furthermore, replacing everything with either of the `RBMaps` would then reintroduce this mess,
+ but with ordering lemmas needed for some `Decidable` instances.
+ 
+-When time allows, I suggest we replace everything with `Batteries.RBMap` and prove the reasoning lemmas we need.
++When time allows, I suggest we replace everything with `RBTree.RBMap` and prove the reasoning lemmas we need.
+ This way, we get decent performance AND the ability to conveniently reason about the structure
+ a'la `Finmap`.
+ 
+ TODO - All of this is very ugly.
+ -/
+ 
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ 
+ import EvmYul.Wheels
+ 
+@@ -25,7 +25,7 @@ namespace EvmYul
+ 
+ section RemoveLater
+ 
+-abbrev ByteMap := Batteries.RBMap UInt256 UInt8 compare
++abbrev ByteMap := RBTree.RBMap UInt256 UInt8 compare
+ 
+ end RemoveLater
+ 
+diff --git a/EvmYul/Maps/StorageMap.lean b/EvmYul/Maps/StorageMap.lean
+index 9b444e3..8beca31 100644
+--- a/EvmYul/Maps/StorageMap.lean
++++ b/EvmYul/Maps/StorageMap.lean
+@@ -4,20 +4,20 @@ We need a more unified approach to maps.
+ This file shouldn't exist; but it does for now.
+ `Finmap`s have terrible computational behaviour, one needs some ordering lemmas to make them compute.
+ 
+-In `Conform`, we use `Lean.RBMap`, although we would ideally use `Batteries.RBMap`, but the `Lean.Json`
+-uses `Lean.RBMap`, which means that we would need an additional cast to `Batteries.RBMap`.
++In `Conform`, we use `Lean.RBMap`, although we would ideally use `RBTree.RBMap`, but the `Lean.Json`
++uses `Lean.RBMap`, which means that we would need an additional cast to `RBTree.RBMap`.
+ 
+ Furthermore, replacing everything with either of the `RBMaps` would then reintroduce this mess,
+ but with ordering lemmas needed for some `Decidable` instances.
+ 
+-When time allows, I suggest we replace everything with `Batteries.RBMap` and prove the reasoning lemmas we need.
++When time allows, I suggest we replace everything with `RBTree.RBMap` and prove the reasoning lemmas we need.
+ This way, we get decent performance AND the ability to conveniently reason about the structure
+ a'la `Finmap`.
+ 
+ TODO - All of this is very ugly.
+ -/
+ 
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ import Mathlib.Data.Multiset.Sort
+ 
+ import EvmYul.Wheels
+@@ -30,7 +30,7 @@ namespace EvmYul
+ 
+ section RemoveLater
+ 
+-abbrev Storage : Type := Batteries.RBMap UInt256 UInt256 compare
++abbrev Storage : Type := RBTree.RBMap UInt256 UInt256 compare
+ 
+ def Storage.toFinmap (self : Storage) : Finmap (λ _ : UInt256 ↦ UInt256) :=
+   self.foldl (init := ∅) λ acc k v ↦ acc.insert (UInt256.ofNat k.1) v
+diff --git a/EvmYul/Pretty.lean b/EvmYul/Pretty.lean
+index 99bc48e..94199fe 100644
+--- a/EvmYul/Pretty.lean
++++ b/EvmYul/Pretty.lean
+@@ -21,7 +21,7 @@ This breaks the moment that `Repr` changes its behaviour; it is fine for the tim
+ def Operation.pretty {τ} (self : Operation τ) : String :=
+   let reprStr := ToString.toString <| repr self
+   let lastComponent := reprStr.splitOn "." |>.getLast!
+-  lastComponent.take lastComponent.length.pred
++  (lastComponent.take lastComponent.length.pred).copy
+ 
+ /--
+ `Finmap`s are not very computation-friendly and so the API is ever so slightly meh;
+@@ -32,8 +32,8 @@ TODO(not critical) - Unify all the maps used throught the formalisation one day.
+ def Finmap.pretty {α β : Type} [ToString α] [ToString β]
+                                [LE ((_ : α) × β)]
+                                [IsTrans ((_ : α) × β) fun x x_1 => x ≤ x_1]
+-                               [IsAntisymm ((_ : α) × β) fun x x_1 => x ≤ x_1]
+-                               [IsTotal ((_ : α) × β) fun x x_1 => x ≤ x_1]
++                               [Std.Antisymm fun (x : (_ : α) × β) x_1 => x ≤ x_1]
++                               [Std.Total fun (x : (_ : α) × β) x_1 => x ≤ x_1]
+                                [DecidableRel fun (x : ((_ : α) × β)) x_1 => x ≤ x_1]
+                   (self : Finmap (λ _ : α ↦ β)) : String := Id.run do
+   let mut result : String := ""
+diff --git a/EvmYul/Semantics.lean b/EvmYul/Semantics.lean
+index 07e65a9..aca7bf5 100644
+--- a/EvmYul/Semantics.lean
++++ b/EvmYul/Semantics.lean
+@@ -216,6 +216,8 @@ def swap (n : ℕ) : Transformer .EVM :=
+     .error .StackUnderflow
+ 
+ -- TODO: Yul halting for `SELFDESTRUCT`
++-- Lean ≥ 4.3x: the dependent `match τ, op` below needs the legacy `do` elaborator.
++set_option backward.do.legacy true in
+ def step {τ : OperationType} (op : Operation τ) (arg : Option (UInt256 × Nat) := .none) : Transformer τ := Id.run do
+   let _ : Id Unit := -- For debug logging
+     match τ with
+diff --git a/EvmYul/State.lean b/EvmYul/State.lean
+index f33b757..4aa7bf6 100644
+--- a/EvmYul/State.lean
++++ b/EvmYul/State.lean
+@@ -1,4 +1,4 @@
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ import Mathlib.Data.Finset.Basic
+ 
+ import EvmYul.State.ExecutionEnv
+@@ -32,7 +32,7 @@ structure State (τ : OperationType) where
+   executionEnv        : ExecutionEnv τ
+   blocks              : ProcessedBlocks
+   genesisBlockHeader  : BlockHeader
+-  createdAccounts     : Batteries.RBSet AccountAddress compare
++  createdAccounts     : RBTree.RBSet AccountAddress compare
+ deriving Inhabited
+ 
+ def State.blockHashes {τ} (self : State τ) : Array UInt256 :=
+diff --git a/EvmYul/State/Account.lean b/EvmYul/State/Account.lean
+index f0cee58..7fa1904 100644
+--- a/EvmYul/State/Account.lean
++++ b/EvmYul/State/Account.lean
+@@ -12,8 +12,8 @@ namespace EvmYul
+   Precompiled contract addresses.
+   (142) `π ≡ {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}`
+ -/
+-def π : Batteries.RBSet AccountAddress compare :=
+-  Batteries.RBSet.ofList ((List.range 11).tail.map (Fin.ofNat _)) compare
++def π : RBTree.RBSet AccountAddress compare :=
++  RBTree.RBSet.ofList ((List.range 11).tail.map (Fin.ofNat _)) compare
+ 
+ inductive ToExecute (τ : OperationType) where
+   | Code (code : Yul.Ast.contractCode τ)
+diff --git a/EvmYul/State/Substate.lean b/EvmYul/State/Substate.lean
+index 60d0cab..5f1d994 100644
+--- a/EvmYul/State/Substate.lean
++++ b/EvmYul/State/Substate.lean
+@@ -1,4 +1,4 @@
+-import Batteries.Data.RBMap
++import Batteries.Recycling.RBTree
+ import EvmYul.UInt256
+ import EvmYul.Wheels
+ import EvmYul.State.Account
+@@ -7,7 +7,7 @@ namespace EvmYul
+ 
+ /--
+ Not important for reasoning about Substate, this is currently done to get some nice performance properties
+-of the `Batteries.RBMap`.
++of the `RBTree.RBMap`.
+ 
+ TODO - to reason about the model, we will be better off with `Finset` or some such -
+ without the requirement of ordering.
+@@ -47,11 +47,11 @@ The `Substate` `A`. Section 6.1.
+ - `logSeries`          `Aₗ`
+ -/
+ structure Substate where
+-  selfDestructSet     : Batteries.RBSet AccountAddress compare
+-  touchedAccounts     : Batteries.RBSet AccountAddress compare
++  selfDestructSet     : RBTree.RBSet AccountAddress compare
++  touchedAccounts     : RBTree.RBSet AccountAddress compare
+   refundBalance       : UInt256
+-  accessedAccounts    : Batteries.RBSet AccountAddress compare
+-  accessedStorageKeys : Batteries.RBSet (AccountAddress × UInt256) Substate.storageKeysCmp
++  accessedAccounts    : RBTree.RBSet AccountAddress compare
++  accessedStorageKeys : RBTree.RBSet (AccountAddress × UInt256) Substate.storageKeysCmp
+   logSeries           : LogSeries
+   deriving BEq, Inhabited, Repr
+ 
+diff --git a/EvmYul/State/Transaction.lean b/EvmYul/State/Transaction.lean
+index 0be9f61..510022c 100644
+--- a/EvmYul/State/Transaction.lean
++++ b/EvmYul/State/Transaction.lean
+@@ -8,7 +8,7 @@ import EvmYul.State.Substate
+ 
+ namespace EvmYul
+ 
+-open Batteries (RBMap RBSet)
++open RBTree (RBMap RBSet)
+ 
+ -- "All transaction types specify a number of common fields:"
+ /--
+diff --git a/EvmYul/StateOps.lean b/EvmYul/StateOps.lean
+index 1e81e71..8dc2f0a 100644
+--- a/EvmYul/StateOps.lean
++++ b/EvmYul/StateOps.lean
+@@ -106,7 +106,7 @@ def gasLimit {τ} (self : State τ) : UInt256 :=
+ def chainId {τ} (_ : State τ) : UInt256 := .ofNat EvmYul.chainId
+ 
+ def selfbalance {τ} (self : State τ) : UInt256 :=
+-  Batteries.RBMap.find? self.accountMap self.executionEnv.codeOwner |>.elim ⟨0⟩ (·.balance)
++  RBTree.RBMap.find? self.accountMap self.executionEnv.codeOwner |>.elim ⟨0⟩ (·.balance)
+ 
+ def setCode (self : State .EVM) (code : ByteArray) : State .EVM :=
+   { self with executionEnv.code := code }
+diff --git a/EvmYul/UInt256.lean b/EvmYul/UInt256.lean
+index 6a0ac29..2d2443a 100644
+--- a/EvmYul/UInt256.lean
++++ b/EvmYul/UInt256.lean
+@@ -132,7 +132,7 @@ def pow (b : UInt256) (n : UInt256) := powAux ⟨1⟩ b n.1
+ instance : HPow UInt256 UInt256 UInt256 := ⟨pow⟩
+ instance : AndOp UInt256 := ⟨UInt256.land⟩
+ instance : OrOp UInt256 := ⟨UInt256.lor⟩
+-instance : Xor UInt256 := ⟨UInt256.xor⟩
++instance : XorOp UInt256 := ⟨UInt256.xor⟩
+ instance : ShiftLeft UInt256 := ⟨UInt256.shiftLeft⟩
+ instance : ShiftRight UInt256 := ⟨UInt256.shiftRight⟩
+ 
+diff --git a/EvmYul/Wheels.lean b/EvmYul/Wheels.lean
+index e2abbc6..ff3055d 100644
+--- a/EvmYul/Wheels.lean
++++ b/EvmYul/Wheels.lean
+@@ -176,7 +176,7 @@ def getBlob? (s : String) : Except String Blob :=
+     let rest := s.drop HexPrefix.length
+     if rest.any (not ∘ isHexDigitChar)
+     then .error "Blobs must consist of valid hex digits."
+-    else .ok rest.toLower
++    else .ok rest.copy.toLower
+   else .error "Input does not begin with 0x."
+   where
+     isHex (s : String) := s.startsWith HexPrefix
+diff --git a/EvmYul/Yul/YulNotation.lean b/EvmYul/Yul/YulNotation.lean
+index 5863ae6..1e4dbd0 100644
+--- a/EvmYul/Yul/YulNotation.lean
++++ b/EvmYul/Yul/YulNotation.lean
+@@ -28,20 +28,19 @@ def idSubsequentChar : Array Char := Id.run <| do
+   return arr.push '.'
+ 
+ def idFn : ParserFn := fun c s => Id.run do
+-  let input := c.input
+   let start := s.pos
+-  if h : input.atEnd start then
++  if h : c.atEnd start then
+     s.mkEOIError
+   else
+-    let fst := input.get' start h
++    let fst := c.get' start h
+     if not (idFirstChar.contains fst) then
+       return s.mkError "yul identifier"
+-    let s := takeWhileFn idSubsequentChar.contains c (s.next input start)
++    let s := takeWhileFn idSubsequentChar.contains c (s.next c start)
+     let stop := s.pos
+-    let name := .str .anonymous (input.extract start stop)
++    let name := .str .anonymous (c.extract start stop)
+     if yulKeywords.contains name.lastComponentAsString then
+       return s.mkError "yul identifier"
+-    mkIdResult start none name c s
++    mkIdResult start none name true c s
+ 
+ def idNoAntiquot : Parser := { fn := idFn }
+ 
+@@ -69,22 +68,22 @@ declare_syntax_cat stmt
+ syntax identifier_list := ident,*
+ syntax typed_identifier_list := ident,*
+ syntax function_call := ident "(" expr,* ")"
+-syntax block := "{" stmt* "}"
+-syntax if' := "if" expr block
++syntax yul_block := "{" stmt* "}"
++syntax if' := "if" expr yul_block
+ syntax function_definition :=
+   "function" ident "(" typed_identifier_list ")"
+     ("->" typed_identifier_list)?
+-    block
++    yul_block
+ syntax params_list := "[" typed_identifier_list "]"
+ syntax variable_declaration := "let" ident (":=" expr)?
+ -- syntax let_str_literal := "let" ident ":=" str -- TODO(fix)
+ syntax variable_declarations := "let" typed_identifier_list (":=" expr)?
+-syntax for_loop := "for" block expr block block
++syntax for_loop := "for" yul_block expr yul_block yul_block
+ syntax assignment := identifier_list ":=" expr
+ 
+ syntax stmtlist := stmt*
+ 
+-syntax block : stmt
++syntax yul_block : stmt
+ syntax if' : stmt
+ syntax function_definition : stmt
+ syntax variable_declarations : stmt
+@@ -127,7 +126,7 @@ partial def translatePrimOp (primOp : PrimOp) : TermElabM Term := do
+   where
+     familyAndInstr (primOp : PrimOp) : TermElabM (String × String) := do
+       let family :: instr :: [] := toString primOp |>.splitOn | throwError s!"{primOp} shape not <family> <instruction>"
+-      pure (family, instr.drop 1 |>.dropRight 1)
++      pure (family, instr.drop 1 |>.dropRight 1 |>.copy)
+     YulTag : Name := "EvmYul.OperationType.Yul".toName
+ 
+ partial def translateIdent (idn : TSyntax `ident) : TSyntax `term :=
+diff --git a/EvmYul/Yul/YulSemanticsTests/Main.lean b/EvmYul/Yul/YulSemanticsTests/Main.lean
+index 6387de3..4c77e9b 100644
+--- a/EvmYul/Yul/YulSemanticsTests/Main.lean
++++ b/EvmYul/Yul/YulSemanticsTests/Main.lean
+@@ -361,7 +361,7 @@ functions := (∅ : Finmap (fun (_ : YulFunctionName) ↦ Yul.Ast.FunctionDefini
+     { code := storageCode
+     , balance := ⟨1000⟩
+     , nonce := ⟨0⟩ 
+-    , storage := Batteries.RBMap.ofList [(⟨0⟩, ⟨21⟩)] compare
++    , storage := RBTree.RBMap.ofList [(⟨0⟩, ⟨21⟩)] compare
+     , tstorage := ∅
+     }
+   let callerCode : YulContract := 
+@@ -1173,7 +1173,7 @@ let storage2Account : Account .Yul :=
+     , tstorage := ∅
+     }
+     
+-  let accountMap : AccountMap .Yul := Batteries.RBMap.insert ∅ storageAddress storageAccount
++  let accountMap : AccountMap .Yul := RBTree.RBMap.insert ∅ storageAddress storageAccount
+                                       |>.insert callerAddress callerAccount
+                                       |>.insert caller2Address caller2Account
+                                       |>.insert storage2Address storage2Account
+diff --git a/lake-manifest.json b/lake-manifest.json
+index 6d13093..028ae96 100644
+--- a/lake-manifest.json
++++ b/lake-manifest.json
+@@ -1,31 +1,31 @@
+-{"version": "1.1.0",
++{"version": "1.2.0",
+  "packagesDir": ".lake/packages",
+  "packages":
+  [{"url": "https://github.com/leanprover-community/mathlib4.git",
+    "type": "git",
+    "subDir": null,
+    "scope": "",
+-   "rev": "79e94a093aff4a60fb1b1f92d9681e407124c2ca",
++   "rev": "0df444a360eaa60ab8c11dca51a86af692955474",
+    "name": "mathlib",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "v4.33.1",
+    "inherited": false,
+    "configFile": "lakefile.lean"},
+   {"url": "https://github.com/leanprover-community/plausible",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "b100ad4c5d74a464f497aaa8e7c74d86bf39a56f",
++   "rev": "b7eb3304aeae834b12dda98993a37f6a41f6f0bb",
+    "name": "plausible",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "main",
+    "inherited": true,
+    "configFile": "lakefile.toml"},
+   {"url": "https://github.com/leanprover-community/LeanSearchClient",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "99657ad92e23804e279f77ea6dbdeebaa1317b98",
++   "rev": "5f4d51b81cbd3f6b32b156bfad9056621a040404",
+    "name": "LeanSearchClient",
+    "manifestFile": "lake-manifest.json",
+    "inputRev": "main",
+@@ -35,61 +35,62 @@
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "eb164a46de87078f27640ee71e6c3841defc2484",
++   "rev": "16f02aa7642864af59f1ff0e384a015994db9118",
+    "name": "importGraph",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "main",
+    "inherited": true,
+    "configFile": "lakefile.toml"},
+   {"url": "https://github.com/leanprover-community/ProofWidgets4",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "1253a071e6939b0faf5c09d2b30b0bfc79dae407",
++   "rev": "4be2e3d5087eeb272cf5a8853b8f9dd025ef5957",
+    "name": "proofwidgets",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v0.0.68",
++   "inputRev": "main",
+    "inherited": true,
+    "configFile": "lakefile.lean"},
+   {"url": "https://github.com/leanprover-community/aesop",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "1256a18522728c2eeed6109b02dd2b8f207a2a3c",
++   "rev": "3448c0bcc5ce01b2d1546e483ec3620e32df3d0e",
+    "name": "aesop",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "master",
+    "inherited": true,
+    "configFile": "lakefile.toml"},
+   {"url": "https://github.com/leanprover-community/quote4",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "917bfa5064b812b7fbd7112d018ea0b4def25ab3",
++   "rev": "92c15be17b7caf78c2ad767ec40f89052d908d81",
+    "name": "Qq",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "master",
+    "inherited": true,
+    "configFile": "lakefile.toml"},
+   {"url": "https://github.com/leanprover-community/batteries",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover-community",
+-   "rev": "240676e9568c254a69be94801889d4b13f3b249f",
++   "rev": "4488d40d070b9700d4d5a6aa342f0d40c31b2a2d",
+    "name": "batteries",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.22.0",
++   "inputRev": "main",
+    "inherited": true,
+    "configFile": "lakefile.toml"},
+   {"url": "https://github.com/leanprover/lean4-cli",
+    "type": "git",
+    "subDir": null,
+    "scope": "leanprover",
+-   "rev": "c682c91d2d4dd59a7187e2ab977ac25bd1f87329",
++   "rev": "6130a47896ce867c6a4a55373441e59e565bad0f",
+    "name": "Cli",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "main",
++   "inputRev": "v4.33.0",
+    "inherited": true,
+    "configFile": "lakefile.toml"}],
+  "name": "evmyul",
+- "lakeDir": ".lake"}
++ "lakeDir": ".lake",
++ "fixedToolchain": false}
+diff --git a/lakefile.lean b/lakefile.lean
+index bdbe015..39774e5 100644
+--- a/lakefile.lean
++++ b/lakefile.lean
+@@ -2,14 +2,14 @@ import Lake
+ open Lake DSL System
+ 
+ require mathlib from git
+-  "https://github.com/leanprover-community/mathlib4.git"@"v4.22.0"
++  "https://github.com/leanprover-community/mathlib4.git"@"v4.33.1"
+ 
+ package «evmyul» {
+   moreLeanArgs := #["-DautoImplicit=false"]
+   moreServerOptions := #[⟨`autoImplicit, false⟩]
+ }
+ 
+-def cloneWithCache (pkg : NPackage _package.name) (dirname url : String) : FetchM (Job GitRepo) := do
++def cloneWithCache (pkg : NPackage __name__) (dirname url : String) : FetchM (Job GitRepo) := do
+   let repoDir : GitRepo := ⟨pkg.dir / dirname⟩
+   if !(← repoDir.dir.pathExists) then dbg_trace s!"Cloning: {url}"; GitRepo.clone url repoDir
+   return pure repoDir
+@@ -61,7 +61,7 @@ extern_lib libleanffi pkg := do
+     discard <| IO.Process.run {cmd := "git", args := #["submodule", "update", "--init"]}
+ 
+   let name := nameToStaticLib "leanffi"
+-  buildStaticLib (pkg.nativeLibDir / name) #[sha256O, keccak256, ffiO]
++  buildStaticLib (pkg.staticLibDir / name) #[sha256O, keccak256, ffiO]
+ 
+ lean_lib «Conform»
+ 
+diff --git a/lean-toolchain b/lean-toolchain
+index 6ac6d4c..a8afa7d 100644
+--- a/lean-toolchain
++++ b/lean-toolchain
+@@ -1 +1 @@
+-leanprover/lean4:v4.22.0
++leanprover/lean4:v4.33.1

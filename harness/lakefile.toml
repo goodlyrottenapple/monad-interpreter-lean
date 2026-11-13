@@ -1,0 +1,19 @@
+# Executables that load and run the ELF in the proof model. Kept in their own
+# package so they do not link the specification's C FFI.
+name = "pure-harness"
+defaultTargets = ["run-pure", "gen-image"]
+
+[[require]]
+name = "riscv-zkvm"
+path = "../.lake/packages/riscv-zkvm"
+
+[[lean_lib]]
+name = "PureAbi"
+
+[[lean_exe]]
+name = "run-pure"
+root = "RunPure"
+
+[[lean_exe]]
+name = "gen-image"
+root = "GenImage"

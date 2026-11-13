@@ -1,0 +1,14 @@
+name = "monad-pure-interp"
+defaultTargets = ["PureInterp"]
+
+[[require]]
+name = "riscv-zkvm"
+git = "https://github.com/Verified-zkEVM/riscv-zkvm"
+rev = "v0.4.0"
+
+[[lean_lib]]
+name = "PureInterp"
+
+[[require]]
+name = "evmyul"
+path = "spec/EVMYulLean"
